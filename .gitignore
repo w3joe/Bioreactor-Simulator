@@ -1,0 +1,5 @@
+# Ignore credentials header files anywhere in the repository
+**/credentials.h
+credentials.h
+
+.venv
