@@ -372,22 +372,23 @@ String timeString(uint32_t t_secs)
 }
 
 //====================================================================================
-//                                  Dat string: 00:00:00
+//                                  Date string: DDMMYYYY
 //====================================================================================
 String dateString(time_t utc)
 {
-  String dateString = dayShortStr(weekday(utc));
-  dateString += " ";
-  dateString += day(utc);
-  if (day(utc) == 1 || day(utc) == 21 || day(utc) == 31) dateString += "st";
-  else if (day(utc) == 2 || day(utc) == 22) dateString += "nd";
-  else if (day(utc) == 3 || day(utc) == 23) dateString += "rd";
-  else dateString += "th";
+  String dateString = "";
 
-  dateString += " ";
-  dateString += monthShortStr((month(utc)));
-  dateString += " ";
+  // Day (DD)
+  if (day(utc) < 10) dateString += "0";
+  dateString += day(utc);
+
+  // Month (MM)
+  if (month(utc) < 10) dateString += "0";
+  dateString += month(utc);
+
+  // Year (YYYY)
   dateString += year(utc);
+
   return dateString;
 }
 //
