@@ -30,6 +30,12 @@ float pHValue = 7.0;                // Current pH reading
 float pHVoltage = 1.65;             // Current voltage reading
 float pHError = 0.0;                // Estimated measurement error (std dev)
 
+// Non-blocking sampling state
+static float voltageSamples[10];    // Array to store samples
+static int currentSampleIndex = 0;  // Current sample being taken
+static unsigned long lastSampleTime = 0;  // Last time a sample was taken
+static bool samplingComplete = false;     // Flag indicating sampling is done
+
 // ADC parameters for ESP32
 const int ADC_RESOLUTION = 4095;    // 12-bit ADC (0-4095)
 const float ADC_VREF = 3.3;         // ESP32 ADC reference voltage
@@ -50,36 +56,73 @@ void initpHSensor(int pin) {
 }
 
 // =========================================================================
-// Read raw voltage from pH sensor with averaging
+// Start non-blocking pH voltage sampling
+// Call this to start a new sampling sequence
 // =========================================================================
-float readpHVoltage(int pin) {
-  float voltageSum = 0.0;
-  float voltageSamples[PH_SAMPLE_COUNT];
+void startpHSampling() {
+  currentSampleIndex = 0;
+  samplingComplete = false;
+  lastSampleTime = 0;
+}
 
-  // Take multiple samples
-  for (int i = 0; i < PH_SAMPLE_COUNT; i++) {
+// =========================================================================
+// Update pH voltage sampling (non-blocking)
+// Call this in loop() - it takes one sample per call when interval elapsed
+// Returns true when sampling is complete
+// =========================================================================
+bool updatepHSampling(int pin, unsigned long currentTime) {
+  if (samplingComplete) {
+    return true;  // Already done
+  }
+
+  // Check if it's time to take next sample
+  if (currentTime - lastSampleTime >= PH_SAMPLE_INTERVAL || currentSampleIndex == 0) {
+    // Take a sample
     int rawADC = analogRead(pin);
     float voltage = (rawADC / (float)ADC_RESOLUTION) * ADC_VREF;
-    voltageSamples[i] = voltage;
-    voltageSum += voltage;
-    delay(PH_SAMPLE_INTERVAL);
+    voltageSamples[currentSampleIndex] = voltage;
+
+    lastSampleTime = currentTime;
+    currentSampleIndex++;
+
+    // Check if we've collected all samples
+    if (currentSampleIndex >= PH_SAMPLE_COUNT) {
+      // Calculate mean
+      float voltageSum = 0.0;
+      for (int i = 0; i < PH_SAMPLE_COUNT; i++) {
+        voltageSum += voltageSamples[i];
+      }
+      float meanVoltage = voltageSum / PH_SAMPLE_COUNT;
+
+      // Calculate standard deviation for error estimation
+      float variance = 0.0;
+      for (int i = 0; i < PH_SAMPLE_COUNT; i++) {
+        float diff = voltageSamples[i] - meanVoltage;
+        variance += diff * diff;
+      }
+      float stdDev = sqrt(variance / PH_SAMPLE_COUNT);
+
+      // Convert voltage std dev to pH std dev (approximate)
+      float slopeAbs = phCal.slope;
+      if (slopeAbs < 0) slopeAbs = -slopeAbs;
+      pHError = stdDev / slopeAbs;
+
+      // Update global pH voltage
+      pHVoltage = meanVoltage;
+
+      samplingComplete = true;
+      return true;
+    }
   }
 
-  // Calculate mean
-  float meanVoltage = voltageSum / PH_SAMPLE_COUNT;
+  return false;  // Still sampling
+}
 
-  // Calculate standard deviation for error estimation
-  float variance = 0.0;
-  for (int i = 0; i < PH_SAMPLE_COUNT; i++) {
-    float diff = voltageSamples[i] - meanVoltage;
-    variance += diff * diff;
-  }
-  float stdDev = sqrt(variance / PH_SAMPLE_COUNT);
-
-  // Convert voltage std dev to pH std dev (approximate)
-  pHError = stdDev / abs(phCal.slope);
-
-  return meanVoltage;
+// =========================================================================
+// Get current pH voltage (from last completed sampling)
+// =========================================================================
+float getpHVoltageReading() {
+  return pHVoltage;
 }
 
 // =========================================================================
@@ -101,12 +144,11 @@ float voltageToPH(float voltage) {
 }
 
 // =========================================================================
-// Read and calculate pH value
+// Calculate pH from current voltage reading
+// Call this after sampling is complete to update pH value
 // =========================================================================
-float readpH(int pin) {
-  pHVoltage = readpHVoltage(pin);
+void calculatepH() {
   pHValue = voltageToPH(pHVoltage);
-  return pHValue;
 }
 
 // =========================================================================
@@ -190,7 +232,7 @@ struct pHController {
   float targetpH = 7.0;           // Target pH setpoint
   float Kp = 100.0;               // Proportional gain (pump duty cycle per pH unit)
   float Ki = 5.0;                 // Integral gain
-  float Kd = 10.0;                // Derivative gain
+  float Kd = 0.0;                 // Derivative gain
   float integral = 0.0;           // Integral accumulator
   float lastError = 0.0;          // Previous error for derivative
   float deadband = 0.05;          // Deadband around target (±0.05 pH units)
@@ -198,6 +240,16 @@ struct pHController {
   int acidPumpPWM = 0;            // Acid pump PWM output (0-255)
   float controlOutput = 0.0;      // Raw controller output
   unsigned long lastControlTime = 0;
+
+  // Pump timing control
+  unsigned long pumpStartTime = 0;       // When pump started
+  unsigned long pumpStopTime = 0;        // When pump last stopped
+  bool pumpActive = false;               // Is pump currently running
+  bool pumpRampingUp = false;            // Is pump in ramp-up phase
+  unsigned long rampStartTime = 0;       // When ramp started
+  const unsigned long MIN_PUMP_ON_TIME = 1000;    // Minimum 1 second pump activation
+  const unsigned long MIN_PUMP_OFF_TIME = 5000;   // Minimum 5 seconds between activations (allow pH to stabilize)
+  const unsigned long RAMP_DURATION = 500;        // 500ms ramp-up time
 };
 
 pHController phPID;
@@ -243,15 +295,20 @@ float getTargetpH() {
 }
 
 // =========================================================================
-// Calculate pH control output using PID
+// Calculate pH control output with pump timing and ramp-up
 // Returns: positive = add base, negative = add acid
+// Pumps ramp from 0->255 over 500ms, then run at 255 for minimum duration
 // =========================================================================
 void calculatepHControl(float currentpH, float deltaTime) {
+  unsigned long currentTime = millis();
+
   // Calculate error (target - current)
   float error = phPID.targetpH - currentpH;
 
   // Apply deadband to avoid unnecessary pump activation
-  if (abs(error) < phPID.deadband) {
+  bool inDeadband = (abs(error) < phPID.deadband);
+
+  if (inDeadband) {
     error = 0.0;
     // Reset integral when in deadband to prevent windup
     phPID.integral = 0.0;
@@ -260,8 +317,10 @@ void calculatepHControl(float currentpH, float deltaTime) {
   // Proportional term
   float P = phPID.Kp * error;
 
-  // Integral term (with anti-windup)
-  phPID.integral += error * deltaTime;
+  // Integral term (only accumulate outside deadband)
+  if (!inDeadband) {
+    phPID.integral += error * deltaTime;
+  }
 
   // Clamp integral to prevent windup
   float integralMax = 255.0 / phPID.Ki;  // Limit based on max PWM
@@ -277,19 +336,91 @@ void calculatepHControl(float currentpH, float deltaTime) {
   // Calculate total control output
   phPID.controlOutput = P + I + D;
 
-  // Determine pump PWM values
-  if (phPID.controlOutput > 0) {
-    // pH too low - add base
-    phPID.basePumpPWM = constrain((int)phPID.controlOutput, 0, 255);
-    phPID.acidPumpPWM = 0;
-  } else if (phPID.controlOutput < 0) {
-    // pH too high - add acid
-    phPID.acidPumpPWM = constrain((int)abs(phPID.controlOutput), 0, 255);
-    phPID.basePumpPWM = 0;
+  // Determine if pump should be active based on error
+  bool shouldActivateBase = (phPID.controlOutput > 0);  // pH too low
+  bool shouldActivateAcid = (phPID.controlOutput < 0);  // pH too high
+
+  // Check if enough time has passed since last pump activation
+  bool canActivatePump = (currentTime - phPID.pumpStopTime >= phPID.MIN_PUMP_OFF_TIME);
+
+  // Pump state machine
+  if (phPID.pumpActive) {
+    // Pump is currently running
+    unsigned long pumpRunTime = currentTime - phPID.pumpStartTime;
+
+    // Check if minimum on-time has elapsed
+    if (pumpRunTime >= phPID.MIN_PUMP_ON_TIME) {
+      // Minimum time met - check if we should turn off
+      if (inDeadband || error * phPID.lastError < 0) {
+        // Turn off pump: either in deadband OR error changed sign (crossed setpoint)
+        phPID.pumpActive = false;
+        phPID.pumpRampingUp = false;
+        phPID.pumpStopTime = currentTime;
+        phPID.basePumpPWM = 0;
+        phPID.acidPumpPWM = 0;
+      } else {
+        // Keep pump at full speed (255)
+        if (shouldActivateBase) {
+          phPID.basePumpPWM = 255;
+          phPID.acidPumpPWM = 0;
+        } else {
+          phPID.acidPumpPWM = 255;
+          phPID.basePumpPWM = 0;
+        }
+      }
+    } else {
+      // Still in minimum on-time period
+      // Handle ramp-up during first 500ms
+      if (phPID.pumpRampingUp) {
+        unsigned long rampTime = currentTime - phPID.rampStartTime;
+        if (rampTime < phPID.RAMP_DURATION) {
+          // Ramp PWM from 0 to 255 over RAMP_DURATION
+          int rampPWM = (rampTime * 255) / phPID.RAMP_DURATION;
+          if (shouldActivateBase) {
+            phPID.basePumpPWM = rampPWM;
+            phPID.acidPumpPWM = 0;
+          } else {
+            phPID.acidPumpPWM = rampPWM;
+            phPID.basePumpPWM = 0;
+          }
+        } else {
+          // Ramp complete - switch to full speed
+          phPID.pumpRampingUp = false;
+          if (shouldActivateBase) {
+            phPID.basePumpPWM = 255;
+            phPID.acidPumpPWM = 0;
+          } else {
+            phPID.acidPumpPWM = 255;
+            phPID.basePumpPWM = 0;
+          }
+        }
+      } else {
+        // Already at full speed
+        if (shouldActivateBase) {
+          phPID.basePumpPWM = 255;
+          phPID.acidPumpPWM = 0;
+        } else {
+          phPID.acidPumpPWM = 255;
+          phPID.basePumpPWM = 0;
+        }
+      }
+    }
   } else {
-    // Within deadband - no adjustment needed
-    phPID.basePumpPWM = 0;
-    phPID.acidPumpPWM = 0;
+    // Pump is not running - check if we should start it
+    if (!inDeadband && canActivatePump && (shouldActivateBase || shouldActivateAcid)) {
+      // Start pump with ramp-up
+      phPID.pumpActive = true;
+      phPID.pumpRampingUp = true;
+      phPID.pumpStartTime = currentTime;
+      phPID.rampStartTime = currentTime;
+      // PWM will be set by ramp logic in next iteration
+      phPID.basePumpPWM = 0;
+      phPID.acidPumpPWM = 0;
+    } else {
+      // Keep pumps off
+      phPID.basePumpPWM = 0;
+      phPID.acidPumpPWM = 0;
+    }
   }
 
   // Store error for next derivative calculation
