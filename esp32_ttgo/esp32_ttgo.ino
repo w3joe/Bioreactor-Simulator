@@ -27,11 +27,10 @@ uint32_t targetTime = 0;
 #define UPDATE_INTERVAL_MS 100  // Update display every 100ms
 
 // UART Communication for bioreactor data
-// Connect ESP32_Arduino_Nano GPIO1 (TX) to ESP32_TTGO GPIO3 (RX)
+// Connect ESP32_DevKit GPIO1 (TX) to ESP32_TTGO GPIO25 (RX)
 // Connect GND of both boards together
-// Note: GPIO16/17 may have restrictions, using GPIO1/3 which are confirmed working
-#define UART_RX_PIN 25   // RX pin for Serial2 25
-#define UART_TX_PIN 26   // TX pin for Serial2 26
+#define UART_RX_PIN 25   // RX pin for Serial2
+#define UART_TX_PIN 26   // TX pin for Serial2 (not used for receiving, but needed for Serial2.begin)
 #define UART_BAUD 115200
 
 // Bioreactor data received from ESP32 DevKit
@@ -91,7 +90,8 @@ void setup()
   Serial.print("UART RX Pin configured: GPIO");
   Serial.println(UART_RX_PIN);
   Serial.println("Waiting for data from ESP32 DevKit...");
-  Serial.println("Expected format: TARGET_RPM,MEASURED_RPM,ERROR_RPM,PWM,PH,PH_ERROR,TEMP,TEMP_ERROR,HEATER_PWM\\n");
+  Serial.println("Expected format: TARGET_RPM,MEASURED_RPM,ERROR_RPM,PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM\\n");
+  Serial.println("Note: pH data will use placeholder values until pH sensor is implemented");
   Serial.println("========================================\n");
  
   tft.init();
@@ -186,7 +186,8 @@ void loop()
 
 // =========================================================================
 // Parse bioreactor data from UART
-// Format: TARGET_RPM,MEASURED_RPM,ERROR_RPM,PWM,PH,PH_ERROR,TEMP,TEMP_ERROR,HEATER_PWM
+// Current format (8 fields): TARGET_RPM,MEASURED_RPM,ERROR_RPM,PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM
+// Note: pH values use placeholders until pH sensor is implemented
 // =========================================================================
 void parseBioreactorData(String data) {
   if (data.length() == 0) {
@@ -202,19 +203,24 @@ void parseBioreactorData(String data) {
   int comma5 = data.indexOf(',', comma4 + 1);
   int comma6 = data.indexOf(',', comma5 + 1);
   int comma7 = data.indexOf(',', comma6 + 1);
-  int comma8 = data.indexOf(',', comma7 + 1);
 
-  if (comma1 > 0 && comma2 > 0 && comma3 > 0 && comma4 > 0 && comma5 > 0 && comma6 > 0 && comma7 > 0 && comma8 > 0) {
-    // Parse all fields
+  // Check for 8-field format (current DevKit implementation)
+  if (comma1 > 0 && comma2 > 0 && comma3 > 0 && comma4 > 0 && comma5 > 0 && comma6 > 0 && comma7 > 0) {
+    // Parse 8 fields: TARGET_RPM,MEASURED_RPM,ERROR_RPM,PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM
     bioreactorData.targetRPM = data.substring(0, comma1).toFloat();
     bioreactorData.measuredRPM = data.substring(comma1 + 1, comma2).toFloat();
     bioreactorData.error = data.substring(comma2 + 1, comma3).toFloat();
     bioreactorData.motorPWM = data.substring(comma3 + 1, comma4).toInt();
-    bioreactorData.pH = data.substring(comma4 + 1, comma5).toFloat();
-    bioreactorData.pHError = data.substring(comma5 + 1, comma6).toFloat();
-    bioreactorData.temperature = data.substring(comma6 + 1, comma7).toFloat();
-    bioreactorData.tempError = data.substring(comma7 + 1, comma8).toFloat();
-    bioreactorData.heaterPWM = data.substring(comma8 + 1).toInt();
+
+    float tempTarget = data.substring(comma4 + 1, comma5).toFloat();
+    bioreactorData.temperature = data.substring(comma5 + 1, comma6).toFloat();
+    bioreactorData.tempError = data.substring(comma6 + 1, comma7).toFloat();
+    bioreactorData.heaterPWM = data.substring(comma7 + 1).toInt();
+
+    // Use placeholder pH values until sensor is implemented
+    bioreactorData.pH = 7.0;  // Neutral pH placeholder
+    bioreactorData.pHError = 0.1;  // Small error placeholder
+
     bioreactorData.dataValid = true;
     bioreactorData.lastUpdate = millis();
 
@@ -225,14 +231,15 @@ void parseBioreactorData(String data) {
       Serial.print(" Temp:");
       Serial.print(bioreactorData.temperature, 1);
       Serial.print("C pH:");
-      Serial.println(bioreactorData.pH, 2);
+      Serial.print(bioreactorData.pH, 2);
+      Serial.println(" (placeholder)");
     }
   } else {
     bioreactorData.dataValid = false;
     Serial.print("[UART] ✗ Parse ERROR: Invalid format. Data: '");
     Serial.print(data);
     Serial.println("'");
-    Serial.println("[UART] Expected: TARGET,MEASURED,ERROR,PWM,PH,PH_ERROR,TEMP,TEMP_ERROR,HEATER_PWM");
+    Serial.println("[UART] Expected: TARGET_RPM,MEASURED_RPM,ERROR_RPM,PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM");
     parseErrors++;
   }
 }
@@ -269,7 +276,7 @@ void printUARTDebugInfo() {
   if (timeSinceLastActivity > 2000) {
     Serial.println("⚠ WARNING: No UART activity for >2 seconds!");
     Serial.println("   Check connections:");
-    Serial.println("   - ESP32_Arduino_Nano GPIO1 (TX) -> ESP32_TTGO GPIO3 (RX)");
+    Serial.println("   - ESP32_DevKit GPIO1 (TX) -> ESP32_TTGO GPIO25 (RX)");
     Serial.println("   - GND connected between boards");
   }
   

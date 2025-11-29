@@ -39,13 +39,13 @@ const float SAMPLING_PERIOD_MS = 10.0;  // 10ms sampling period
 
 #define TARGET_RPM 400.0
 #define TARGET_PH 5.0
-#define TARGET_TEMP 35.0
+#define TARGET_TEMP 40.0
 
 // UART Communication pins
-// Connect ESP32_Arduino_Nano GPIO4 (TX) to ESP32_TTGO GPIO16 (RX)
+// Connect ESP32_DevKit GPIO1 (TX) to ESP32_TTGO GPIO25 (RX)
 // Connect GND of both boards together
 #define UART_TX_PIN 1  // TX pin for Serial2
-#define UART_RX_PIN 0  // RX pin for Serial2 (not used for sending, but needed for Serial2 initialization)
+#define UART_RX_PIN 0  // RX pin for Serial2 (not used for sending, but needed for Serial2.begin)
 #define UART_BAUD 115200
 
 //interrupt routine
@@ -96,7 +96,7 @@ void setup()
 
   // Initialize Bang-Bang controllers
   initController();
-  setTargetSpeed(500.0);  // Set initial target speed to 500 RPM
+  setTargetSpeed(200.0);  // Set initial target speed to 500 RPM
 
   initTempController();
   setTargetTemp(TARGET_TEMP);  // Set initial target temperature (35°C)
