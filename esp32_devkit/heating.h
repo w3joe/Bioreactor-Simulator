@@ -12,7 +12,7 @@ const double STEINHART_B = 2.378405444e-04;
 const double STEINHART_C = 2.019202697e-07;
 
 // Bang-Bang Controller state variables
-static float targetTemp = 0.0;              // Target temperature in °C (initialized to 0, set by user)
+static float targetTemp = 30.0;              // Target temperature in °C (initialized to 0, set by user)
 static float tempDeltaT = 0.5;              // Hysteresis band (±0.5°C around setpoint)
 static bool tempControllerInitialized = false; // Initialization flag
 static float currentTemp = 25.0;            // Current measured temperature

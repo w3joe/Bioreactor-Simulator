@@ -58,7 +58,7 @@ unsigned long bytesReceived = 0;
 unsigned long packetsReceived = 0;
 unsigned long parseErrors = 0;
 #define DEBUG_INTERVAL_MS 5000  // Print debug info every 5 seconds
-#define MAX_BYTES_PER_LOOP 32   // Process max 32 bytes per loop iteration to prevent blocking
+#define MAX_BYTES_PER_LOOP 128  // Process max 128 bytes per loop iteration (increased to prevent buffer overflow)
 
 void setup()
 {
@@ -116,11 +116,19 @@ void setup()
 void loop()
 {
   // =========================================================================
-  // UART Data Reception from ESP32 Arduino Nano (Non-blocking)
+  // UART Data Reception from ESP32 DevKit (Non-blocking)
   // Process a limited number of bytes per loop to prevent blocking
   // =========================================================================
   if (Serial2.available() > 0) {
     lastUARTActivity = millis();
+
+    // Debug: print every 100th time we receive data (disabled to prevent blocking)
+    // static unsigned long rxCount = 0;
+    // rxCount++;
+    // if (rxCount % 100 == 0) {
+    //   Serial.print("[DEBUG] UART RX active, bytes available: ");
+    //   Serial.println(Serial2.available());
+    // }
 
     // Process max MAX_BYTES_PER_LOOP bytes per iteration to avoid blocking
     int bytesToProcess = min(Serial2.available(), MAX_BYTES_PER_LOOP);
@@ -134,6 +142,13 @@ void loop()
       if (c == '\n') {
         // End of packet, parse the data
         if (uartBuffer.length() > 0) {
+          // Debug: print raw packet to diagnose parsing issues
+          Serial.print("[DEBUG] Raw packet (len=");
+          Serial.print(uartBuffer.length());
+          Serial.print("): '");
+          Serial.print(uartBuffer);
+          Serial.println("'");
+
           parseBioreactorData(uartBuffer);
           packetsReceived++;
         }
@@ -143,10 +158,14 @@ void loop()
         continue;
       } else {
         uartBuffer += c;  // Add character to buffer
-        if (uartBuffer.length() > 100) {
-          // Buffer overflow protection
-          Serial.println("[UART] WARNING: Buffer overflow, clearing buffer");
-          uartBuffer = "";
+        if (uartBuffer.length() > 200) {
+          // Buffer overflow protection - increased to 200 to accommodate longer packets
+          Serial.print("[UART] ✗ Buffer overflow! Length: ");
+          Serial.print(uartBuffer.length());
+          Serial.print(" Content: '");
+          Serial.print(uartBuffer.substring(0, 50));  // Print first 50 chars
+          Serial.println("...'");
+          uartBuffer = "";  // Clear
         }
       }
     }

@@ -39,13 +39,13 @@ const float SAMPLING_PERIOD_MS = 10.0;  // 10ms sampling period
 
 #define TARGET_RPM 400.0
 #define TARGET_PH 5.0
-#define TARGET_TEMP 40.0
+#define TARGET_TEMP 35.0
 
 // UART Communication pins
-// Connect ESP32_DevKit GPIO1 (TX) to ESP32_TTGO GPIO25 (RX)
+// Connect ESP32_Nano GPIO17 (TX2) to ESP32_TTGO GPIO25 (RX)
 // Connect GND of both boards together
-#define UART_TX_PIN 1  // TX pin for Serial2
-#define UART_RX_PIN 0  // RX pin for Serial2 (not used for sending, but needed for Serial2.begin)
+#define UART_TX_PIN 11  // TX pin for Serial2 (use GPIO instead of GPIO1 to avoid USB conflict)
+#define UART_RX_PIN 12  // RX pin for Serial2 (use GPIO16 instead of GPIO0)
 #define UART_BAUD 115200
 
 //interrupt routine
@@ -96,7 +96,7 @@ void setup()
 
   // Initialize Bang-Bang controllers
   initController();
-  setTargetSpeed(200.0);  // Set initial target speed to 500 RPM
+  setTargetSpeed(500.0);  // Set initial target speed to 500 RPM
 
   initTempController();
   setTargetTemp(TARGET_TEMP);  // Set initial target temperature (35°C)
@@ -104,7 +104,7 @@ void setup()
   // Initialize timing variables
   currtime = micros();
   prevtime = currtime;
-  nextControlTime = currtime;
+  nextControlTime = currtime + 10000;  // Start first control cycle in 10ms
 
   Serial.print("✓ Stirring controller initialized - Target: ");
   Serial.print(getTargetSpeed());
@@ -154,7 +154,7 @@ void loop()
 
     // Check stirring controller health
     if (!checkControllerHealth(measspeed, Vmotor)) {
-      Serial.println("WARNING: Stirring controller health check failed");
+      // Serial.println("WARNING: Stirring controller health check failed");
     }
 
     // Calculate stirring error
@@ -174,33 +174,46 @@ void loop()
 
     // Check temperature controller health
     if (!checkTempControllerHealth(measTemp, heaterPWM)) {
-      Serial.println("WARNING: Temperature controller health check failed");
+      // Serial.println("WARNING: Temperature controller health check failed");
     }
 
     // Calculate temperature error
     float tempError = getTargetTemp() - measTemp;
 
     // =========================================================================
-    // UART Communication to Display Board
+    // UART Communication to Display Board (Send every 100ms = every 10 loops)
     // =========================================================================
-    // Send data via UART to ESP32 TTGO display board
-    // Format: RPM_TARGET,RPM_MEASURED,RPM_ERROR,RPM_PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM\n
-    Serial2.print(getTargetSpeed(), 1);
-    Serial2.print(",");
-    Serial2.print(measspeed, 1);
-    Serial2.print(",");
-    Serial2.print(rpmError, 1);
-    Serial2.print(",");
-    Serial2.print(Vmotor);
-    Serial2.print(",");
-    Serial2.print(getTargetTemp(), 1);
-    Serial2.print(",");
-    Serial2.print(measTemp, 1);
-    Serial2.print(",");
-    Serial2.print(tempError, 1);
-    Serial2.print(",");
-    Serial2.print(heaterPWM);
-    Serial2.print("\n");
+    static unsigned long loopCounter = 0;
+    loopCounter++;
+
+    if (loopCounter % 10 == 0) {  // Send every 10th loop (10ms × 10 = 100ms)
+      // Send data via UART to ESP32 TTGO display board
+      // Format: RPM_TARGET,RPM_MEASURED,RPM_ERROR,RPM_PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM\n
+      Serial2.print(getTargetSpeed(), 1);
+      Serial2.print(",");
+      Serial2.print(measspeed, 1);
+      Serial2.print(",");
+      Serial2.print(rpmError, 1);
+      Serial2.print(",");
+      Serial2.print(Vmotor);
+      Serial2.print(",");
+      Serial2.print(getTargetTemp(), 1);
+      Serial2.print(",");
+      Serial2.print(measTemp, 1);
+      Serial2.print(",");
+      Serial2.print(tempError, 1);
+      Serial2.print(",");
+      Serial2.print(heaterPWM);
+      Serial2.print("\n");
+
+      // Debug: Confirm UART transmission every 100 sends (every 10 seconds)
+      static unsigned long txCount = 0;
+      txCount++;
+      if (txCount % 100 == 0) {
+        Serial.print("[DEBUG] UART TX sent #");
+        Serial.println(txCount);
+      }
+    }
 
     // =========================================================================
     // Serial Plotter Output
