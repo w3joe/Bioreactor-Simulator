@@ -3,3 +3,4 @@ pandas
 numpy
 paho-mqtt
 requests
+plotly

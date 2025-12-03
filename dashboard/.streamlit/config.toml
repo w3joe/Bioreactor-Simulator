@@ -1,0 +1,28 @@
+[theme]
+# Primary theme colors
+primaryColor = "#FF4B4B"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#262730"
+textColor = "#FAFAFA"
+font = "sans serif"
+
+[server]
+# Enable CORS for development
+enableCORS = false
+enableXsrfProtection = true
+maxUploadSize = 200
+
+[browser]
+# Automatically open browser when starting
+gatherUsageStats = false
+
+[runner]
+# Faster rerun on file changes and smoother animations
+fastReruns = true
+# Faster chart updates
+updateInterval = 0.5
+
+[ui]
+# Hide unnecessary UI elements for cleaner look
+hideTopBar = false
+hideSidebarNav = false
