@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "stirring.h"  // Bang-Bang Controller for stirring motor
 #include "heating.h"   // Bang-Bang Controller for heating element
+#include "ph_control.h" // pH sensor and pump control
 
 // Stirring motor control variables
 unsigned long currtime = 0;
@@ -37,16 +38,22 @@ const float SAMPLING_PERIOD_MS = 10.0;  // 10ms sampling period
 #define PWM_FREQ 5000        // 5 kHz PWM frequency
 #define PWM_RESOLUTION 10    // 10-bit resolution (0-1023)
 
-#define TARGET_RPM 400.0
-#define TARGET_PH 5.0
-#define TARGET_TEMP 35.0
+// Default initial setpoints (will be updated by TTGO via UART)
+#define DEFAULT_RPM 500.0
+#define DEFAULT_PH 7.0
+#define DEFAULT_TEMP 35.0
 
-// UART Communication pins
-// Connect ESP32_Nano GPIO17 (TX2) to ESP32_TTGO GPIO25 (RX)
+// UART Communication pins (Bidirectional)
+// Connect ESP32_DevKit GPIO11 (TX) to ESP32_TTGO GPIO25 (RX)
+// Connect ESP32_DevKit GPIO12 (RX) to ESP32_TTGO GPIO26 (TX)
 // Connect GND of both boards together
-#define UART_TX_PIN 11  // TX pin for Serial2 (use GPIO instead of GPIO1 to avoid USB conflict)
-#define UART_RX_PIN 12  // RX pin for Serial2 (use GPIO16 instead of GPIO0)
+#define UART_TX_PIN 11  // TX pin for Serial2 (sends sensor data to TTGO)
+#define UART_RX_PIN 12  // RX pin for Serial2 (receives setpoints from TTGO)
 #define UART_BAUD 115200
+
+// UART receive buffer for setpoint commands
+String uartRxBuffer = "";
+#define MAX_UART_BUFFER_SIZE 100
 
 //interrupt routine
 void freqcount() {
@@ -94,12 +101,16 @@ void setup()
   // Calculate conversion factor: RPM = (freq * 60) / PULSES_PER_REV
   freqtoRPM = 60.0 / PULSES_PER_REV;
 
-  // Initialize Bang-Bang controllers
+  // Initialize Bang-Bang controllers with default setpoints
+  // These will be updated by TTGO via UART once connection is established
   initController();
-  setTargetSpeed(500.0);  // Set initial target speed to 500 RPM
+  setTargetSpeed(DEFAULT_RPM);  // Default: 500 RPM
 
   initTempController();
-  setTargetTemp(TARGET_TEMP);  // Set initial target temperature (35°C)
+  setTargetTemp(DEFAULT_TEMP);  // Default: 35°C
+
+  initPHControl();
+  setTargetpH(DEFAULT_PH);  // Default: 7.0 pH
 
   // Initialize timing variables
   currtime = micros();
@@ -112,14 +123,29 @@ void setup()
   Serial.print("✓ Temperature controller initialized - Target: ");
   Serial.print(getTargetTemp());
   Serial.println(" °C");
+  Serial.print("✓ pH controller initialized - Target: ");
+  Serial.print(getTargetpH());
+  Serial.println(" pH");
   Serial.println("========================================\n");
 
   Serial.println("Starting control loops NOW");
-  Serial.println("RPM_Target,RPM_Measured,RPM_Error,RPM_PWM,Hysteresis,MotorPWM,Temp_Target,Temp_Measured,Temp_Error,HeaterPWM");
+  Serial.println("RPM_Target,RPM_Measured,RPM_Error,RPM_PWM,Hysteresis,MotorPWM,Temp_Target,Temp_Measured,Temp_Error,HeaterPWM,PH_Target,PH_Measured,PumpState");
+  Serial.println("\nWaiting for setpoint commands from TTGO...");
+  Serial.println("Expected format: SET:RPM=500.0,TEMP=35.0,PH=7.0");
 }
 
 void loop()
 {
+  // =========================================================================
+  // Check for Setpoint Commands from TTGO (Non-blocking)
+  // =========================================================================
+  checkForSetpointCommands();
+
+  // =========================================================================
+  // pH Control Update (Non-blocking)
+  // =========================================================================
+  updatePHControl();
+
   // =========================================================================
   // Control Loop (10ms update rate)
   // =========================================================================
@@ -185,10 +211,9 @@ void loop()
     // =========================================================================
     static unsigned long loopCounter = 0;
     loopCounter++;
-
     if (loopCounter % 10 == 0) {  // Send every 10th loop (10ms × 10 = 100ms)
       // Send data via UART to ESP32 TTGO display board
-      // Format: RPM_TARGET,RPM_MEASURED,RPM_ERROR,RPM_PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM\n
+      // Format: RPM_TARGET,RPM_MEASURED,RPM_ERROR,RPM_PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM,PH_TARGET,PH_MEASURED,PUMP_STATE\n
       Serial2.print(getTargetSpeed(), 1);
       Serial2.print(",");
       Serial2.print(measspeed, 1);
@@ -204,6 +229,12 @@ void loop()
       Serial2.print(tempError, 1);
       Serial2.print(",");
       Serial2.print(heaterPWM);
+      Serial2.print(",");
+      Serial2.print(getTargetpH(), 2);
+      Serial2.print(",");
+      Serial2.print(getCurrentpH(), 2);
+      Serial2.print(",");
+      Serial2.print(getPumpState());
       Serial2.print("\n");
 
       // Debug: Confirm UART transmission every 100 sends (every 10 seconds)
@@ -219,25 +250,150 @@ void loop()
     // Serial Plotter Output
     // =========================================================================
     // Print data for Serial Plotter (comma-separated values)
-    // Format: RPM_Target,RPM_Measured,RPM_Error,RPM_PWM,Hysteresis,MotorPWM,Temp_Target,Temp_Measured,Temp_Error,HeaterPWM
-    Serial.print(getTargetSpeed());
-    Serial.print(",");
-    Serial.print(measspeed);
-    Serial.print(",");
-    Serial.print(rpmError);
-    Serial.print(",");
-    Serial.print(Vmotor);
-    Serial.print(",");
-    Serial.print(getIntegralTerm());  // Returns hysteresis value for stirring
-    Serial.print(",");
-    Serial.print(motorPWM);
-    Serial.print(",");
+    // Format: RPM_Target,RPM_Measured,RPM_Error,RPM_PWM,Hysteresis,MotorPWM,Temp_Target,Temp_Measured,Temp_Error,HeaterPWM,PH_Target,PH_Measured,PumpState
+    // Serial.print(getTargetSpeed());
+    // Serial.print(",");
+    // Serial.print(measspeed);
+    // Serial.print(",");
+    // Serial.print(rpmError);
+    // Serial.print(",");
+    // Serial.print(Vmotor);
+    // Serial.print(",");
+    // Serial.print(getIntegralTerm());  // Returns hysteresis value for stirring
+    // Serial.print(",");
+    // Serial.print(motorPWM);
+    // Serial.print(",");
+    if (loopCounter % 1000 == 0) {
     Serial.print(getTargetTemp());
     Serial.print(",");
     Serial.print(measTemp);
     Serial.print(",");
     Serial.print(tempError);
     Serial.print(",");
-    Serial.println(heaterPWM);
+    Serial.print(heaterPWM);
+    Serial.print("\n");
+    }
+    // Serial.print(",");
+    // Serial.print(getTargetpH());
+    // Serial.print(",");
+    // Serial.print(getCurrentpH());
+    // Serial.print(",");
+    // Serial.println(getPumpState());
+  }
+}
+
+// =========================================================================
+// Non-blocking function to check for and parse setpoint commands from TTGO
+// Format: SET:RPM=500.0,TEMP=35.0\n
+// =========================================================================
+void checkForSetpointCommands() {
+  // Process available UART data without blocking
+  while (Serial2.available() > 0) {
+    char c = Serial2.read();
+
+    if (c == '\n') {
+      // End of command - parse it
+      if (uartRxBuffer.length() > 0) {
+        parseSetpointCommand(uartRxBuffer);
+      }
+      uartRxBuffer = "";  // Clear buffer
+    } else if (c == '\r') {
+      // Ignore carriage return
+      continue;
+    } else {
+      uartRxBuffer += c;
+
+      // Buffer overflow protection
+      if (uartRxBuffer.length() > MAX_UART_BUFFER_SIZE) {
+        Serial.print("[UART RX] ERROR: Buffer overflow! Clearing buffer. Content: ");
+        Serial.println(uartRxBuffer.substring(0, 50));
+        uartRxBuffer = "";
+      }
+    }
+  }
+}
+
+// =========================================================================
+// Parse setpoint command and update controller targets
+// Expected format: SET:RPM=500.0,TEMP=35.0,PH=7.0
+// =========================================================================
+void parseSetpointCommand(String command) {
+  // Check if this is a setpoint command
+  if (!command.startsWith("SET:")) {
+    Serial.print("[UART RX] WARNING: Unknown command format: ");
+    Serial.println(command);
+    return;
+  }
+
+  // Remove "SET:" prefix
+  String data = command.substring(4);
+
+  // Parse RPM, TEMP, and PH values
+  int rpmIndex = data.indexOf("RPM=");
+  int tempIndex = data.indexOf("TEMP=");
+  int phIndex = data.indexOf("PH=");
+
+  // Parse and validate RPM setpoint
+  if (rpmIndex >= 0) {
+    int rpmEnd = data.indexOf(',', rpmIndex);
+    if (rpmEnd < 0) rpmEnd = data.length();
+
+    String rpmStr = data.substring(rpmIndex + 4, rpmEnd);
+    float newRPM = rpmStr.toFloat();
+
+    if (newRPM >= 0.0 && newRPM <= 1000.0) {
+      setTargetSpeed(newRPM);
+      Serial.print("[UART RX] ✓ Updated RPM setpoint: ");
+      Serial.print(newRPM, 1);
+      Serial.println(" RPM");
+    } else {
+      Serial.print("[UART RX] ERROR: Invalid RPM value: ");
+      Serial.println(newRPM);
+    }
+  }
+
+  // Parse and validate TEMP setpoint
+  if (tempIndex >= 0) {
+    int tempEnd = data.indexOf(',', tempIndex);
+    if (tempEnd < 0) tempEnd = data.length();
+
+    String tempStr = data.substring(tempIndex + 5, tempEnd);
+    float newTemp = tempStr.toFloat();
+
+    if (newTemp >= 20.0 && newTemp <= 45.0) {
+      setTargetTemp(newTemp);
+      Serial.print("[UART RX] ✓ Updated TEMP setpoint: ");
+      Serial.print(newTemp, 1);
+      Serial.println(" °C");
+    } else {
+      Serial.print("[UART RX] ERROR: Invalid TEMP value: ");
+      Serial.println(newTemp);
+    }
+  }
+
+  // Parse and validate pH setpoint
+  if (phIndex >= 0) {
+    int phEnd = data.indexOf(',', phIndex);
+    if (phEnd < 0) phEnd = data.length();
+
+    String phStr = data.substring(phIndex + 3, phEnd);
+    float newPH = phStr.toFloat();
+
+    if (newPH >= 4.0 && newPH <= 10.0) {
+      setTargetpH(newPH);
+      Serial.print("[UART RX] ✓ Updated PH setpoint: ");
+      Serial.print(newPH, 2);
+      Serial.println(" pH");
+    } else {
+      Serial.print("[UART RX] ERROR: Invalid PH value: ");
+      Serial.println(newPH);
+    }
+  }
+
+  // Verify at least one valid parameter was found
+  if (rpmIndex < 0 && tempIndex < 0 && phIndex < 0) {
+    Serial.print("[UART RX] ERROR: Invalid setpoint format: ");
+    Serial.println(command);
+    Serial.println("Expected: SET:RPM=500.0,TEMP=35.0,PH=7.0");
   }
 }

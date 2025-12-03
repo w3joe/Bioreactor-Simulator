@@ -26,7 +26,8 @@ const int PWM_RESOLUTION = 10;              // 0-1023
 // Constants
 const float MIN_TEMP_SETPOINT = 20.0;       // Minimum setpoint (°C)
 const float MAX_TEMP_SETPOINT = 45.0;       // Maximum setpoint (°C)
-const int PWM_POWER_VALUE = 400;            // 39% Power (400/1023)
+//CHANGE1
+const int PWM_POWER_VALUE = 550;            // 39% Power (400/1023)
 const int PWM_OFF_VALUE = 0;                // 0% Power (OFF)
 const float TEMP_SAMPLING_TIME = 0.1;       // Sampling time in seconds (100 ms)
 

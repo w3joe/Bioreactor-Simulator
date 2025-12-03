@@ -182,22 +182,22 @@ void updatePHControl() {
     rampMotor(MOTOR_A_PIN, currentDutyA, 0);
     rampMotor(MOTOR_B_PIN, currentDutyB, 0);
   }
+//CHANGE1
+  // // ---- Print readings ----
+  // if (now - lastPrintTime > PRINT_INTERVAL) {
+  //   Serial.print("Current pH: ");
+  //   Serial.println(currentPH, 2);
 
-  // ---- Print readings ----
-  if (now - lastPrintTime > PRINT_INTERVAL) {
-    Serial.print("Current pH: ");
-    Serial.println(currentPH, 2);
+  //   Serial.print("avgADC: ");
+  //   Serial.println(lastAvgADC);
 
-    Serial.print("avgADC: ");
-    Serial.println(lastAvgADC);
+  //   Serial.print("Pump A duty = ");
+  //   Serial.print(currentDutyA);
+  //   Serial.print(" , Pump B duty = ");
+  //   Serial.println(currentDutyB);
 
-    Serial.print("Pump A duty = ");
-    Serial.print(currentDutyA);
-    Serial.print(" , Pump B duty = ");
-    Serial.println(currentDutyB);
-
-    lastPrintTime = now;
-  }
+  //   lastPrintTime = now;
+  // }
 }
 
 // =========================================================================
