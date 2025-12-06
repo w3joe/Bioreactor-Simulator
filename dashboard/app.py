@@ -76,9 +76,10 @@ page_1_introduction = st.Page("page_1_introduction.py", title="Introduction", ic
 page_2_stirring_system = st.Page("page_2_stirring_system.py", title="Stirring System", icon="⚙️")
 page_3_heating_system = st.Page("page_3_heating_system.py", title="Heating System", icon="🔥")
 page_4_pH_system = st.Page("page_4_pH_system.py", title="pH System", icon="🧪")
+page_5_data_logging = st.Page("page_5_data_logging.py", title="Data Logging", icon="📊")
 
 # Set up navigation
-pg = st.navigation([main_page, page_1_introduction, page_2_stirring_system, page_3_heating_system, page_4_pH_system])
+pg = st.navigation([main_page, page_1_introduction, page_2_stirring_system, page_3_heating_system, page_4_pH_system, page_5_data_logging])
 
 # Run the selected page
 pg.run()

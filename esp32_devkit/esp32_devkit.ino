@@ -13,9 +13,21 @@ float deltaT = 0.01;
 float freq = 0.0;
 float freqtoRPM = 0.0;
 
+// Rolling average for RPM (1 second window = 100 samples at 10ms rate)
+#define RPM_BUFFER_SIZE 100
+float rpmBuffer[RPM_BUFFER_SIZE];
+int rpmBufferIndex = 0;
+float rpmAverage = 0.0;
+
 // Temperature control variables
 float measTemp = 0.0;
 int heaterPWM = 0;
+
+// Rolling average for Temperature (1 second window = 100 samples at 10ms rate)
+#define TEMP_BUFFER_SIZE 100
+float tempBuffer[TEMP_BUFFER_SIZE];
+int tempBufferIndex = 0;
+float tempAverage = 0.0;
 
 // Hall sensor variables (adjust pin and conversion factor as needed)
 volatile unsigned long pulseCount = 0;
@@ -101,6 +113,16 @@ void setup()
   // Calculate conversion factor: RPM = (freq * 60) / PULSES_PER_REV
   freqtoRPM = 60.0 / PULSES_PER_REV;
 
+  // Initialize RPM rolling average buffer
+  for (int i = 0; i < RPM_BUFFER_SIZE; i++) {
+    rpmBuffer[i] = 0.0;
+  }
+
+  // Initialize Temperature rolling average buffer
+  for (int i = 0; i < TEMP_BUFFER_SIZE; i++) {
+    tempBuffer[i] = 0.0;
+  }
+
   // Initialize Bang-Bang controllers with default setpoints
   // These will be updated by TTGO via UART once connection is established
   initController();
@@ -109,7 +131,7 @@ void setup()
   initTempController();
   setTargetTemp(DEFAULT_TEMP);  // Default: 35°C
 
-  initPHControl();
+  initPHControl(PH_SENSOR_PIN, BASE_PUMP_PIN, ACID_PUMP_PIN);
   setTargetpH(DEFAULT_PH);  // Default: 7.0 pH
 
   // Initialize timing variables
@@ -169,6 +191,17 @@ void loop()
     // Convert frequency to RPM
     measspeed = freq * freqtoRPM;
 
+    // Add current RPM to rolling average buffer
+    rpmBuffer[rpmBufferIndex] = measspeed;
+    rpmBufferIndex = (rpmBufferIndex + 1) % RPM_BUFFER_SIZE;
+
+    // Calculate rolling average over 500ms
+    float rpmSum = 0.0;
+    for (int i = 0; i < RPM_BUFFER_SIZE; i++) {
+      rpmSum += rpmBuffer[i];
+    }
+    rpmAverage = rpmSum / RPM_BUFFER_SIZE;
+
     // Bang-Bang Controller calculates motor voltage (0 or 1023)
     Vmotor = calculateMotorVoltage(getTargetSpeed(), measspeed, deltaT);
 
@@ -192,6 +225,17 @@ void loop()
     // Read temperature from thermistor
     measTemp = readTemperature(TEMP_SENSOR_PIN);
 
+    // Add current temperature to rolling average buffer
+    tempBuffer[tempBufferIndex] = measTemp;
+    tempBufferIndex = (tempBufferIndex + 1) % TEMP_BUFFER_SIZE;
+
+    // Calculate rolling average over 1 second
+    float tempSum = 0.0;
+    for (int i = 0; i < TEMP_BUFFER_SIZE; i++) {
+      tempSum += tempBuffer[i];
+    }
+    tempAverage = tempSum / TEMP_BUFFER_SIZE;
+
     // Bang-Bang Controller calculates heater PWM (0 or PWM_POWER_VALUE)
     heaterPWM = calculateHeaterPWM(getTargetTemp(), measTemp, deltaT);
 
@@ -214,19 +258,23 @@ void loop()
     if (loopCounter % 10 == 0) {  // Send every 10th loop (10ms × 10 = 100ms)
       // Send data via UART to ESP32 TTGO display board
       // Format: RPM_TARGET,RPM_MEASURED,RPM_ERROR,RPM_PWM,TEMP_TARGET,TEMP_MEASURED,TEMP_ERROR,HEATER_PWM,PH_TARGET,PH_MEASURED,PUMP_STATE\n
+      // Use 1 second rolling average (100 samples) for RPM and Temperature display and server transmission
+      float rpmErrorAvg = getTargetSpeed() - rpmAverage;
+      float tempErrorAvg = getTargetTemp() - tempAverage;
+
       Serial2.print(getTargetSpeed(), 1);
       Serial2.print(",");
-      Serial2.print(measspeed, 1);
+      Serial2.print(rpmAverage, 1);  // Send 1s averaged RPM
       Serial2.print(",");
-      Serial2.print(rpmError, 1);
+      Serial2.print(rpmErrorAvg, 1);  // Error based on averaged RPM
       Serial2.print(",");
       Serial2.print(Vmotor);
       Serial2.print(",");
       Serial2.print(getTargetTemp(), 1);
       Serial2.print(",");
-      Serial2.print(measTemp, 1);
+      Serial2.print(tempAverage, 1);  // Send 1s averaged Temperature
       Serial2.print(",");
-      Serial2.print(tempError, 1);
+      Serial2.print(tempErrorAvg, 1);  // Error based on averaged Temperature
       Serial2.print(",");
       Serial2.print(heaterPWM);
       Serial2.print(",");
@@ -251,19 +299,18 @@ void loop()
     // =========================================================================
     // Print data for Serial Plotter (comma-separated values)
     // Format: RPM_Target,RPM_Measured,RPM_Error,RPM_PWM,Hysteresis,MotorPWM,Temp_Target,Temp_Measured,Temp_Error,HeaterPWM,PH_Target,PH_Measured,PumpState
-    // Serial.print(getTargetSpeed());
-    // Serial.print(",");
-    // Serial.print(measspeed);
-    // Serial.print(",");
-    // Serial.print(rpmError);
-    // Serial.print(",");
-    // Serial.print(Vmotor);
-    // Serial.print(",");
-    // Serial.print(getIntegralTerm());  // Returns hysteresis value for stirring
-    // Serial.print(",");
-    // Serial.print(motorPWM);
-    // Serial.print(",");
-    if (loopCounter % 1000 == 0) {
+    Serial.print(getTargetSpeed());
+    Serial.print(",");
+    Serial.print(measspeed);
+    Serial.print(",");
+    Serial.print(rpmError);
+    Serial.print(",");
+    Serial.print(Vmotor);
+    Serial.print(",");
+    Serial.print(getIntegralTerm());  // Returns hysteresis value for stirring
+    Serial.print(",");
+    Serial.print(motorPWM);
+    Serial.print(",");
     Serial.print(getTargetTemp());
     Serial.print(",");
     Serial.print(measTemp);
@@ -272,13 +319,12 @@ void loop()
     Serial.print(",");
     Serial.print(heaterPWM);
     Serial.print("\n");
-    }
-    // Serial.print(",");
-    // Serial.print(getTargetpH());
-    // Serial.print(",");
-    // Serial.print(getCurrentpH());
-    // Serial.print(",");
-    // Serial.println(getPumpState());
+    Serial.print(",");
+    Serial.print(getTargetpH());
+    Serial.print(",");
+    Serial.print(readPHVoltage());
+    Serial.print(",");
+    Serial.println(getPumpState());
   }
 }
 

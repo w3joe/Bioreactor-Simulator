@@ -1,229 +1,284 @@
 #ifndef PH_CONTROL_H
 #define PH_CONTROL_H
 
+#include <Arduino.h>
+#include <math.h>
+
 // =========================================================================
 // pH Sensor Measurement and Control Module
 // =========================================================================
 // This module handles:
-// - Analog pH sensor reading with moving average filtering
-// - Startup priming sequence for pumps
+// - Voltage-based pH sensor reading with averaging
+// - Startup priming sequence for pumps (60s acid + 50s base)
 // - Deadband control to prevent oscillation
-// - PWM ramping for smooth motor control
+// - Pulse-based pump control (300ms pulses)
 // =========================================================================
 
 // pH sensor sampling configuration
-#define PH_SENSOR_PIN 39
-#define SAMPLING_INTERVAL 20
-#define PRINT_INTERVAL 800
-#define ARRAY_LENGTH 40
-
-// Pump pin assignments
-const int MOTOR_A_PIN = 25;  // Pump A (raises pH - base)
-const int MOTOR_B_PIN = 26;  // Pump B (lowers pH - acid)
+#define SAMPLE_COUNT 20
 
 // pH control parameters
-float targetPH = 5.0;
-float deadband = 0.2;        // ±0.2 pH deadband
+static float targetVoltage = 0.95;      // Target voltage (updated based on target pH)
+static float voltageTolerance = 0.003;  // ±0.003V deadband
+static float targetPH = 5.0;
+static float currentPH = 0.0;
+static float currentVoltage = 0.0;
 
 // Pump timing settings
-unsigned long pumpRunTime = 3000;      // pump dosing time (ms)
-unsigned long pumpCooldown = 5000;     // minimum time between doses (ms)
-
-// Timing variables
-unsigned long lastPumpAction = 0;
-unsigned long pumpStopTime = 0;
+#define PUMP_DURATION 300        // Pump pulse duration (ms)
+static unsigned long REST_INTERVAL = 3000;  // Time between pump actions (ms)
+static unsigned long LAST_ACTUATION = 0;
 
 // Startup priming sequence
-int startupPhase = 0;    // 0 = Pump A priming, 1 = Pump B priming, 2 = normal operation
-unsigned long startupEndTime = 0;
-const unsigned long primeDuration = 42000;  // 42 seconds
+static int startupPhase = 0;    // 0 = Acid pump priming, 1 = Base pump priming, 2 = normal operation
+static unsigned long startupEndTime = 0;
+static const unsigned long acidPrimeDuration = 76000;  // 60 seconds for acid
+static const unsigned long basePrimeDuration = 14000;  // 50 seconds for base
 
-int pumpState = 0;       // 0 = off, 1 = Pump A, 2 = Pump B
+static int pumpState = 0;       // 0 = off, 1 = Base pump, 2 = Acid pump
 
-// PWM configuration
-const int maxDuty = 255;
-int currentDutyA = 0;
-int currentDutyB = 0;
-int rampStep = 1;
-
-// pH sensor data - moving average filter
-int pHArray[ARRAY_LENGTH];
-int pHArrayIndex = 0;
-double lastAvgADC = 0;
-float currentPH = 0.0;
-
-// Timing for sampling and printing
-unsigned long lastSamplingTime = 0;
-unsigned long lastPrintTime = 0;
+// Pin assignments (set during initialization)
+static int phSensorPin = 0;
+static int basePumpPin = 0;
+static int acidPumpPin = 0;
 
 // =========================================================================
 // Helper Functions
 // =========================================================================
 
-// Simple average helper
-double averageArray(int* arr, int len) {
+/**
+ * Read voltage from pH sensor with averaging
+ * @return Voltage reading from pH sensor (0-3.3V)
+ */
+float readPHVoltage() {
   long sum = 0;
-  for (int i = 0; i < len; ++i) sum += arr[i];
-  return (double)sum / len;
+  for (int i = 0; i < SAMPLE_COUNT; i++){
+    sum += analogRead(phSensorPin);
+  }
+  float average = sum / float(SAMPLE_COUNT);
+  float voltage = (average / 4095.0) * 3.3;  // ESP32 ADC: 12-bit (0-4095), 3.3V
+  return voltage;
 }
 
-// PWM smooth ramp helper
-void rampMotor(int pin, int &currentDuty, int targetDuty) {
-  if (currentDuty < targetDuty) currentDuty += rampStep;
-  else if (currentDuty > targetDuty) currentDuty -= rampStep;
+/**
+ * Convert voltage to pH using calibration formula
+ * @param voltage Voltage reading from sensor
+ * @return pH value
+ */
+float voltageToPH(float voltage) {
+  float pH = (voltage + 1.4) / 0.47;
+  return pH;
+}
 
-  if (currentDuty < 0) currentDuty = 0;
-  if (currentDuty > maxDuty) currentDuty = maxDuty;
+/**
+ * Calculate current pH from sensor
+ * @return Current pH value
+ */
+float calculateCurrentPH() {
+  float voltage = readPHVoltage();
+  float pH = voltageToPH(voltage);
+  return pH;
+}
 
-  analogWrite(pin, currentDuty);
+/**
+ * Activate pump for specified duration (blocking delay)
+ * @param pin GPIO pin number for pump
+ */
+void activatePump(int pin){
+  digitalWrite(pin, HIGH);
+  delay(PUMP_DURATION);
+  digitalWrite(pin, LOW);
 }
 
 // =========================================================================
 // Initialize pH Control System
 // =========================================================================
-void initPHControl() {
-  analogSetPinAttenuation(PH_SENSOR_PIN, ADC_11db);
+/**
+ * Initialize the pH control system
+ * @param phPin GPIO pin for pH sensor (analog input)
+ * @param basePin GPIO pin for base pump (digital output)
+ * @param acidPin GPIO pin for acid pump (digital output)
+ */
+void initPHControl(int phPin, int basePin, int acidPin) {
+  phSensorPin = phPin;
+  basePumpPin = basePin;
+  acidPumpPin = acidPin;
 
-  pinMode(MOTOR_A_PIN, OUTPUT);
-  pinMode(MOTOR_B_PIN, OUTPUT);
+  analogSetPinAttenuation(phSensorPin, ADC_11db);
 
-  analogWrite(MOTOR_A_PIN, 0);
-  analogWrite(MOTOR_B_PIN, 0);
+  pinMode(basePumpPin, OUTPUT);
+  pinMode(acidPumpPin, OUTPUT);
+
+  digitalWrite(basePumpPin, LOW);
+  digitalWrite(acidPumpPin, LOW);
 
   Serial.println("pH Control System Initializing...");
 
-  // Begin priming Pump A first
+  // Begin priming acid pump first
   startupPhase = 0;
-  startupEndTime = millis() + primeDuration;
-  lastSamplingTime = millis();
-  lastPrintTime = millis();
+  startupEndTime = millis() + acidPrimeDuration;
 
-  Serial.println("Priming Pump A for 42 seconds...");
+  Serial.println("Priming acid pump for 60 seconds...");
 }
 
 // =========================================================================
 // Update pH Control Loop
 // Call this repeatedly in main loop()
 // =========================================================================
+/**
+ * Update pH control - must be called repeatedly in main loop
+ * Handles priming sequence and normal pH control
+ */
 void updatePHControl() {
   unsigned long now = millis();
 
   // ---- STARTUP PRIMING SEQUENCE ----
-  if (startupPhase < 2) {
-    if (startupPhase == 0) {
-      rampMotor(MOTOR_A_PIN, currentDutyA, maxDuty);
-      rampMotor(MOTOR_B_PIN, currentDutyB, 0);
+  // Phase 0: Pump acid continuously for 60 seconds
+  if (startupPhase == 0) {
+    if (now < startupEndTime) {
+      // Keep acid pump ON continuously
+      digitalWrite(acidPumpPin, HIGH);
+      pumpState = 2;
+    } else {
+      // Acid priming complete, turn off pump
+      digitalWrite(acidPumpPin, LOW);
+      Serial.println("Acid priming complete (60s)");
+      Serial.println("Priming base pump for 50 seconds...");
 
-      if (now >= startupEndTime) {
-        startupPhase = 1;
-        startupEndTime = now + primeDuration;
-        Serial.println("Priming Pump B for 42 seconds...");
-      }
+      // Move to base priming phase
+      startupPhase = 1;
+      startupEndTime = now + basePrimeDuration;
     }
-    else if (startupPhase == 1) {
-      rampMotor(MOTOR_A_PIN, currentDutyA, 0);
-      rampMotor(MOTOR_B_PIN, currentDutyB, maxDuty);
+    return;
+  }
 
-      if (now >= startupEndTime) {
-        startupPhase = 2;
-        Serial.println("Priming complete. Switching to normal pH control.");
-      }
+  // Phase 1: Pump base continuously for 50 seconds
+  if (startupPhase == 1) {
+    if (now < startupEndTime) {
+      // Keep base pump ON continuously
+      digitalWrite(basePumpPin, HIGH);
+      pumpState = 1;
+    } else {
+      // Base priming complete, turn off pump
+      digitalWrite(basePumpPin, LOW);
+      Serial.println("Base priming complete (50s)");
+      Serial.println("Priming complete. Switching to normal pH control.");
+
+      // Move to normal operation
+      startupPhase = 2;
+      LAST_ACTUATION = now;
     }
     return;
   }
 
   // ---- Normal operation AFTER priming ----
 
-  // ---- pH Sampling ----
-  if (now - lastSamplingTime > SAMPLING_INTERVAL) {
-    pHArray[pHArrayIndex++] = analogRead(PH_SENSOR_PIN);
-    if (pHArrayIndex >= ARRAY_LENGTH) pHArrayIndex = 0;
+  // Read current voltage and pH
+  currentVoltage = readPHVoltage();
+  currentPH = voltageToPH(currentVoltage);
 
-    lastAvgADC = averageArray(pHArray, ARRAY_LENGTH);
+  float difference = targetVoltage - currentVoltage;
 
-    // Calibration line: pH = 0.0064 * ADC + 3.0644
-    currentPH = 0.0064 * lastAvgADC + 3.0644;
-
-    lastSamplingTime = now;
-  }
-
-  // ---- Pump stop logic ----
-  if (pumpState != 0 && now >= pumpStopTime) {
+  // Check if enough time has passed since last actuation
+  if ((now - LAST_ACTUATION) < REST_INTERVAL) {
     pumpState = 0;
-    Serial.println("Pump stopping...");
+    return;
   }
 
-  // ---- Pump start logic with deadband ----
-  if (pumpState == 0 && (now - lastPumpAction) > pumpCooldown) {
-    if (currentPH < (targetPH - deadband)) {
-      pumpState = 1;
-      lastPumpAction = now;
-      pumpStopTime = now + pumpRunTime;
-      Serial.println("pH LOW → Pump A dosing");
-    }
-    else if (currentPH > (targetPH + deadband)) {
-      pumpState = 2;
-      lastPumpAction = now;
-      pumpStopTime = now + pumpRunTime;
-      Serial.println("pH HIGH → Pump B dosing");
-    }
+  // Check if within tolerance (deadband)
+  if (fabs(difference) < voltageTolerance) {
+    pumpState = 0;
+    return;
   }
 
-  // ---- Apply PWM ramp control ----
-  if (pumpState == 1) {
-    rampMotor(MOTOR_A_PIN, currentDutyA, maxDuty);
-    rampMotor(MOTOR_B_PIN, currentDutyB, 0);
-  }
-  else if (pumpState == 2) {
-    rampMotor(MOTOR_A_PIN, currentDutyA, 0);
-    rampMotor(MOTOR_B_PIN, currentDutyB, maxDuty);
-  }
-  else {
-    rampMotor(MOTOR_A_PIN, currentDutyA, 0);
-    rampMotor(MOTOR_B_PIN, currentDutyB, 0);
-  }
-//CHANGE1
-  // // ---- Print readings ----
-  // if (now - lastPrintTime > PRINT_INTERVAL) {
-  //   Serial.print("Current pH: ");
-  //   Serial.println(currentPH, 2);
+  // Determine which pump to activate
+  if (difference < 0){
+    // Voltage too high, need to lower it - activate acid pump
+    Serial.print("Voltage: ");
+    Serial.print(currentVoltage, 4);
+    Serial.print(" V, Error: ");
+    Serial.print(difference, 4);
+    Serial.println(" V");
+    Serial.println("Acid pump engaged");
 
-  //   Serial.print("avgADC: ");
-  //   Serial.println(lastAvgADC);
+    activatePump(acidPumpPin);
+    pumpState = 2;
+    LAST_ACTUATION = now;
+  } else {
+    // Voltage too low, need to raise it - activate base pump
+    Serial.print("Voltage: ");
+    Serial.print(currentVoltage, 4);
+    Serial.print(" V, Error: ");
+    Serial.print(difference, 4);
+    Serial.println(" V");
+    Serial.println("Base pump engaged");
 
-  //   Serial.print("Pump A duty = ");
-  //   Serial.print(currentDutyA);
-  //   Serial.print(" , Pump B duty = ");
-  //   Serial.println(currentDutyB);
-
-  //   lastPrintTime = now;
-  // }
+    activatePump(basePumpPin);
+    pumpState = 1;
+    LAST_ACTUATION = now;
+  }
 }
 
 // =========================================================================
-// Getter functions
+// Getter and Setter Functions
 // =========================================================================
+
+/**
+ * Get current pH reading
+ * @return Current pH value
+ */
 float getCurrentpH() {
   return currentPH;
 }
 
+/**
+ * Get target pH value
+ * @return Target pH value
+ */
 float getTargetpH() {
   return targetPH;
 }
 
+/**
+ * Set target pH value and calculate corresponding target voltage
+ * @param target New target pH value
+ */
 void setTargetpH(float target) {
   targetPH = target;
+
+  // Convert pH to voltage using inverse of: pH = (voltage + 1.4) / 0.47
+  // Solving for voltage: voltage = (pH * 0.47) - 1.4
+  targetVoltage = (targetPH * 0.4667) - 1.3667;
+
   Serial.print("Target pH updated to: ");
-  Serial.println(targetPH, 2);
+  Serial.print(targetPH, 2);
+  Serial.print(" pH (");
+  Serial.print(targetVoltage, 3);
+  Serial.println("V)");
 }
 
+/**
+ * Get current pump state
+ * @return 0=off, 1=base pump, 2=acid pump
+ */
 int getPumpState() {
   return pumpState;
 }
 
+/**
+ * Get startup phase
+ * @return 0=acid priming, 1=base priming, 2=normal operation
+ */
 int getStartupPhase() {
   return startupPhase;
 }
 
-#endif // PH_CONTROL_H
+/**
+ * Get current voltage reading
+ * @return Current voltage from pH sensor
+ */
+float getCurrentVoltage() {
+  return currentVoltage;
+}
 
+#endif // PH_CONTROL_H
